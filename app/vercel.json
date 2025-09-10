@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    { "source": "/dashboard", "destination": "/" },
+    { "source": "/how-it-works", "destination": "/" },
+    { "source": "/asset-coverage", "destination": "/" },
+    { "source": "/pricing", "destination": "/" },
+    { "source": "/documentation", "destination": "/" },
+    { "source": "/about", "destination": "/" },
+    { "source": "/faq", "destination": "/" },
+    { "source": "/contact", "destination": "/" }
+  ]
+}
