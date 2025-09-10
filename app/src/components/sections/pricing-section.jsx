@@ -139,7 +139,7 @@ export function Pricing18() {
                   One-Time Sale Full Ownership
                 </h3>
                 <p className="my-2 text-6xl font-bold md:text-9xl lg:text-10xl">
-                  $2.5M USD
+                  Upon Request
                 </p>
                 <p className="text-sm text-gray-600 mb-4">
                   Permanent exclusivity
@@ -170,7 +170,7 @@ export function Pricing18() {
                 <HoverButton 
                   className="btn-gradient w-full" 
                   title="Request Full Ownership"
-                  aria-label="Request full ownership of ARAD System for $2.5 million"
+                  aria-label="Request full ownership of ARAD System"
                   onClick={() => scrollToSection('contact')}
                 >
                   Request Full Ownership

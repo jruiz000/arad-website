@@ -3,8 +3,7 @@ import { Chart } from "chart.js/auto";
 import { enUS } from "date-fns/locale";
 import "chartjs-adapter-date-fns";
 import { parseSimpleCsv } from "../../utils/csv";
-// gsap is used inside animateChartWithGsap
-import { animateChartWithGsap } from "../../hooks/useGsapChartAnimation";
+import { gsap } from "gsap";
 
 // Plugin to draw live percentage labels near the latest point of each series
 const pctLabelsPlugin = {
@@ -33,17 +32,121 @@ const pctLabelsPlugin = {
       if (!base) continue;
       const pct = ((curr / base) - 1) * 100;
       const label = `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
-      ctx.font = ds.label === "Strategy" ? "600 12px Inter, system-ui, -apple-system, Segoe UI, Roboto" : "500 11px Inter, system-ui, -apple-system, Segoe UI, Roboto";
+      ctx.font = ds.emphasized ? "600 12px Inter, system-ui, -apple-system, Segoe UI, Roboto" : "500 11px Inter, system-ui, -apple-system, Segoe UI, Roboto";
       ctx.fillStyle = ds.borderColor || "#fff";
       ctx.strokeStyle = "rgba(0,0,0,0.4)";
       ctx.lineWidth = 3;
       ctx.strokeText(label, x, y);
       ctx.fillText(label, x, y);
+      // Glowing moving dot on emphasized series
+      if (ds.emphasized) {
+        ctx.save();
+        ctx.shadowColor = ds.borderColor || "#fff";
+        ctx.shadowBlur = 16;
+        ctx.fillStyle = ds.borderColor || "#fff";
+        ctx.beginPath();
+        ctx.arc(elem.x, elem.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
     }
     ctx.restore();
   },
 };
 Chart.register(pctLabelsPlugin);
+
+// Animate progressive point-by-point reveal using GSAP
+function animateRevealByIndex(chart, newData, opts = {}) {
+  const duration = opts.duration ?? 6.0;
+  const ease = opts.ease ?? "power1.inOut";
+  const baseValue = opts.baseValue ?? 0;
+  // Apply labels
+  const labels = newData.labels ? newData.labels.slice() : [];
+  chart.data.labels = labels;
+  const L = labels.length;
+  // Clone target arrays per dataset
+  const targets = newData.datasets.map((ds) => (Array.isArray(ds.data) ? ds.data.slice() : []));
+  // Initialize datasets with nulls but keep styling
+  chart.data.datasets = newData.datasets.map((ds) => ({
+    ...ds,
+    data: new Array(L).fill(null),
+  }));
+  // Precompute previous valid index for each point
+  const prevIdxMap = targets.map((arr) => {
+    const res = new Array(L).fill(-1);
+    let last = -1;
+    for (let j = 0; j < L; j++) {
+      res[j] = last;
+      const v = arr[j];
+      if (v !== null && v !== undefined) last = j;
+    }
+    return res;
+  });
+  // Ensure base array exists for percent labels and tooltip
+  if (!chart.$pctBase) {
+    chart.$pctBase = newData.datasets.map((ds) => {
+      for (let j = 0; j < L; j++) {
+        const v = ds.data[j];
+        if (v !== null && v !== undefined) return Number(v) || 0;
+      }
+      return 0;
+    });
+  }
+  // Kill previous tweens and start
+  gsap.killTweensOf(chart);
+  const state = { p: 0 };
+  chart.update("none");
+  gsap.to(state, {
+    p: Math.max(0, L - 1),
+    duration,
+    ease,
+    onUpdate: () => {
+      const p = state.p;
+      const iFloor = Math.max(0, Math.floor(p));
+      const frac = p - iFloor;
+      for (let di = 0; di < chart.data.datasets.length; di++) {
+        const ds = chart.data.datasets[di];
+        const tgt = targets[di];
+        const prevMap = prevIdxMap[di];
+        for (let j = 0; j < L; j++) {
+          if (j < iFloor) {
+            ds.data[j] = tgt[j];
+          } else if (j === iFloor) {
+            const tv = tgt[j];
+            if (tv === null || tv === undefined) {
+              ds.data[j] = null;
+            } else {
+              const pk = prevMap[j];
+              const sv = pk >= 0 ? (tgt[pk] ?? baseValue) : (chart.$pctBase?.[di] ?? baseValue);
+              ds.data[j] = sv + (tv - sv) * frac;
+            }
+          } else {
+            ds.data[j] = null;
+          }
+        }
+      }
+      chart.update("none");
+    },
+    onComplete: () => {
+      // Snap to final targets
+      for (let di = 0; di < chart.data.datasets.length; di++) {
+        chart.data.datasets[di].data = targets[di].slice();
+      }
+      // Show tooltip on emphasized dataset's last point
+      const emphIndex = newData.datasets.findIndex((d) => d.emphasized);
+      const dsIndex = emphIndex >= 0 ? emphIndex : newData.datasets.length - 1;
+      let lastIdx = L - 1;
+      for (; lastIdx >= 0; lastIdx--) {
+        const v = targets[dsIndex][lastIdx];
+        if (v !== null && v !== undefined) break;
+      }
+      if (lastIdx >= 0) {
+        chart.setActiveElements([{ datasetIndex: dsIndex, index: lastIdx }]);
+      }
+      chart.update();
+    },
+  });
+}
 
 /**
  * CsvComparisonChart
@@ -165,7 +268,30 @@ export default function CsvComparisonChart({ sources = [], options }) {
         interaction: { mode: "index", intersect: false },
         plugins: {
           legend: { display: true, position: "top", labels: { color: "#fff" } },
-          tooltip: { enabled: false },
+          tooltip: {
+            enabled: true,
+            mode: "nearest",
+            intersect: false,
+            displayColors: false,
+            filter: (item) => {
+              const ds = item.dataset || {};
+              return !!ds.emphasized;
+            },
+            callbacks: {
+              label: (ctx) => {
+                const ds = ctx.dataset || {};
+                const chart = ctx.chart;
+                const baseArr = chart.$pctBase || [];
+                const dsIndex = ctx.datasetIndex ?? 0;
+                const base = Number(baseArr[dsIndex] || 0);
+                const y = Number(ctx.parsed?.y ?? 0);
+                if (!base) return `${ds.label || ""}: ${y.toLocaleString()}`;
+                const pct = ((y / base) - 1) * 100;
+                const sign = pct >= 0 ? "+" : "";
+                return `${ds.label || ""}: ${sign}${pct.toFixed(1)}%`;
+              },
+            },
+          },
           decimation: { enabled: true, algorithm: "lttb" },
         },
         hover: { mode: null }, // Disable hover interactions
@@ -190,7 +316,7 @@ export default function CsvComparisonChart({ sources = [], options }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Animate initial load and subsequent updates with GSAP growing from bottom
+  // Animate initial load and subsequent updates with GSAP point-by-point reveal
   useEffect(() => {
     if (!chartRef.current || !chartData) return;
 
@@ -204,11 +330,10 @@ export default function CsvComparisonChart({ sources = [], options }) {
     });
     chartRef.current.$pctBase = baseForPct;
 
-    // Animate from base of 0 to current values over ~5 seconds
-    animateChartWithGsap(chartRef.current, chartData, {
-      duration: 5.0,
+    // Point-by-point reveal with glowing head and final tooltip
+    animateRevealByIndex(chartRef.current, chartData, {
+      duration: 7.0,
       ease: "power2.out",
-      fromBase: true,
       baseValue: 0,
     });
   }, [chartData]);
