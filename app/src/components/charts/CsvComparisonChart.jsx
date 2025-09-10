@@ -3,31 +3,47 @@ import { Chart } from "chart.js/auto";
 import { enUS } from "date-fns/locale";
 import "chartjs-adapter-date-fns";
 import { parseSimpleCsv } from "../../utils/csv";
-import { gsap } from "gsap";
+// gsap is used inside animateChartWithGsap
+import { animateChartWithGsap } from "../../hooks/useGsapChartAnimation";
 
-// Custom plugin to clip the chart drawing area for a reveal effect
-const revealPlugin = {
-  id: "revealLine",
-  beforeDatasetsDraw(chart) {
-    const { ctx, chartArea } = chart;
-    if (!chartArea || chart.$revealProgress === undefined) return;
-    const progress = chart.$revealProgress; // 0 -> 1
-    const clipRight = chartArea.left + chartArea.width * progress;
-
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(chartArea.left, chartArea.top, Math.max(0, clipRight - chartArea.left), chartArea.height);
-    ctx.clip();
-  },
+// Plugin to draw live percentage labels near the latest point of each series
+const pctLabelsPlugin = {
+  id: "pctLabels",
   afterDatasetsDraw(chart) {
-    if (chart.$revealProgress !== undefined) {
-      chart.ctx.restore();
+    const { ctx, chartArea } = chart;
+    if (!chartArea) return;
+    const baseArr = chart.$pctBase || [];
+    ctx.save();
+    for (let i = 0; i < chart.data.datasets.length; i++) {
+      const ds = chart.data.datasets[i];
+      const meta = chart.getDatasetMeta(i);
+      if (!meta || meta.hidden) continue;
+      const dataArr = ds.data || [];
+      let lastIdx = -1;
+      for (let j = dataArr.length - 1; j >= 0; j--) {
+        const v = dataArr[j];
+        if (v !== null && v !== undefined) { lastIdx = j; break; }
+      }
+      if (lastIdx < 0 || !meta.data || !meta.data[lastIdx]) continue;
+      const elem = meta.data[lastIdx];
+      const x = elem.x + 6; // slight offset to the right
+      const y = elem.y - 6; // slight offset upward
+      const base = Number(baseArr[i] ?? 0);
+      const curr = Number(dataArr[lastIdx] ?? 0);
+      if (!base) continue;
+      const pct = ((curr / base) - 1) * 100;
+      const label = `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
+      ctx.font = ds.label === "Strategy" ? "600 12px Inter, system-ui, -apple-system, Segoe UI, Roboto" : "500 11px Inter, system-ui, -apple-system, Segoe UI, Roboto";
+      ctx.fillStyle = ds.borderColor || "#fff";
+      ctx.strokeStyle = "rgba(0,0,0,0.4)";
+      ctx.lineWidth = 3;
+      ctx.strokeText(label, x, y);
+      ctx.fillText(label, x, y);
     }
+    ctx.restore();
   },
 };
-
-// Register reveal plugin globally
-Chart.register(revealPlugin);
+Chart.register(pctLabelsPlugin);
 
 /**
  * CsvComparisonChart
@@ -54,7 +70,7 @@ export default function CsvComparisonChart({ sources = [], options }) {
     karry: "#FFE5D0",
   };
 
-  // Fetch all CSVs and align by date
+  // Fetch all CSVs and align by date. Supports per-source hasHeader/dateField/valueField.
   useEffect(() => {
     let mounted = true;
 
@@ -70,10 +86,11 @@ export default function CsvComparisonChart({ sources = [], options }) {
             const res = await fetch(src.url, { cache: "no-store" });
             if (!res.ok) throw new Error(`Failed to load ${src.url}`);
             const text = await res.text();
-            const rows = parseSimpleCsv(text, { hasHeader: true });
+            const rows = parseSimpleCsv(text, { hasHeader: src.hasHeader !== false });
             const valueField = src.valueField || "equity";
+            const dateField = src.dateField || "date";
             const points = rows
-              .map((r) => ({ date: r.date, value: Number(r[valueField] ?? 0) }))
+              .map((r) => ({ date: r[dateField], value: Number(r[valueField] ?? 0) }))
               .filter((p) => p.date && !Number.isNaN(p.value));
             return { label: src.label, color: src.color, points };
           })
@@ -105,22 +122,30 @@ export default function CsvComparisonChart({ sources = [], options }) {
 
   const chartData = useMemo(() => {
     if (!labels.length || !series.length) return null;
-    const datasets = series.map((s, idx) => {
+    // Build map per series to align with labels
+    const baseDatasets = series.map((s, idx) => {
       const map = new Map(s.points.map((p) => [p.date, p.value]));
       const data = labels.map((d) => map.get(d) ?? null);
       const palette = [colors.meteorite, colors.frenchRose, colors.geraldine, colors.mediumRedViolet];
-      return {
+      const isEmphasized = (s.label || "").toLowerCase().includes("strategy") || (s.label || "").toLowerCase().includes("arad");
+      const common = {
         label: s.label,
         data,
         borderColor: s.color || palette[idx % palette.length],
         backgroundColor: s.color || palette[idx % palette.length],
-        borderWidth: 2,
+        borderWidth: isEmphasized ? 3.5 : 2,
         tension: 0.35,
         pointRadius: 0,
         spanGaps: true,
         fill: false,
+        emphasized: isEmphasized,
       };
+      return common;
     });
+    // Ensure emphasized series draws on top by making it the last dataset
+    const emphasized = baseDatasets.filter((d) => d.emphasized);
+    const others = baseDatasets.filter((d) => !d.emphasized);
+    const datasets = [...others, ...emphasized];
     return { labels, datasets };
   }, [labels, series]);
 
@@ -140,7 +165,7 @@ export default function CsvComparisonChart({ sources = [], options }) {
         interaction: { mode: "index", intersect: false },
         plugins: {
           legend: { display: true, position: "top", labels: { color: "#fff" } },
-          tooltip: { enabled: false }, // Disable tooltips
+          tooltip: { enabled: false },
           decimation: { enabled: true, algorithm: "lttb" },
         },
         hover: { mode: null }, // Disable hover interactions
@@ -155,7 +180,7 @@ export default function CsvComparisonChart({ sources = [], options }) {
             ticks: { color: "#e5e7eb", major: { enabled: true } },
             grid: { color: "rgba(255,255,255,0.08)" },
           },
-          y: { ticks: { color: "#e5e7eb" }, grid: { color: "rgba(255,255,255,0.08)" } },
+          y: { beginAtZero: true, ticks: { color: "#e5e7eb" }, grid: { color: "rgba(255,255,255,0.08)" } },
         },
         ...options,
       },
@@ -165,22 +190,26 @@ export default function CsvComparisonChart({ sources = [], options }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Animate initial load with left-to-right reveal
+  // Animate initial load and subsequent updates with GSAP growing from bottom
   useEffect(() => {
     if (!chartRef.current || !chartData) return;
 
-    // Assign data to chart
-    chartRef.current.data = chartData;
+    // Store base values for percentage labels (first non-null per dataset)
+    const baseForPct = chartData.datasets.map((ds) => {
+      for (let i = 0; i < ds.data.length; i++) {
+        const v = ds.data[i];
+        if (v !== null && v !== undefined) return Number(v) || 0;
+      }
+      return 0;
+    });
+    chartRef.current.$pctBase = baseForPct;
 
-    // Use GSAP to animate the reveal
-    chartRef.current.$revealProgress = 0;
-    gsap.to(chartRef.current, {
-      $revealProgress: 1,
-      duration: 4, // 4-second animation
-      ease: "none", // Linear animation
-      onUpdate: () => {
-        chartRef.current.update("none"); // Update chart without built-in animations
-      },
+    // Animate from base of 0 to current values over ~5 seconds
+    animateChartWithGsap(chartRef.current, chartData, {
+      duration: 5.0,
+      ease: "power2.out",
+      fromBase: true,
+      baseValue: 0,
     });
   }, [chartData]);
 
