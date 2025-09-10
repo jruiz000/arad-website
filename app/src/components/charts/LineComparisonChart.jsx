@@ -53,10 +53,10 @@ export default function LineComparisonChart({ data, options }) {
         fill: false,
       },
       {
-        label: "Strategy",
+        label: "ARAD",
         data: [100, 103, 105, 109, 112, 118, 122, 128],
-        borderColor: colors.geraldine,
-        backgroundColor: colors.geraldine,
+        borderColor: "#ffffff",
+        backgroundColor: "#ffffff",
         borderWidth: 2,
         tension: 0.35,
         pointRadius: 2,
