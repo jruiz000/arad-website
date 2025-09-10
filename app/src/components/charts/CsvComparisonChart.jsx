@@ -59,11 +59,21 @@ function animateRevealByIndex(chart, newData, opts = {}) {
   const L = labels.length;
   // Clone target arrays per dataset
   const targets = newData.datasets.map((ds) => (Array.isArray(ds.data) ? ds.data.slice() : []));
-  // Initialize datasets with nulls but keep styling
-  chart.data.datasets = newData.datasets.map((ds) => ({
-    ...ds,
-    data: new Array(L).fill(null),
-  }));
+  // Initialize datasets with nulls but keep styling (and hard-enforce ARAD mapping)
+  chart.data.datasets = newData.datasets.map((ds) => {
+    const labelRaw = String(ds.label || "");
+    const isEmph = ds.emphasized || /strategy|arad/i.test(labelRaw);
+    const label = isEmph ? "ARAD" : labelRaw;
+    const color = isEmph ? "#ffffff" : (ds.borderColor || ds.backgroundColor);
+    return {
+      ...ds,
+      emphasized: isEmph,
+      label,
+      borderColor: color || ds.borderColor,
+      backgroundColor: color || ds.backgroundColor,
+      data: new Array(L).fill(null),
+    };
+  });
   // Precompute previous valid index for each point
   const prevIdxMap = targets.map((arr) => {
     const res = new Array(L).fill(-1);
@@ -131,7 +141,8 @@ function animateRevealByIndex(chart, newData, opts = {}) {
           const pct = ((curr / base) - 1) * 100;
           const sign = pct >= 0 ? "+" : "";
           if (chart.options?.plugins?.title) {
-            chart.options.plugins.title.text = `${ds.label || ""}: ${sign}${pct.toFixed(1)}%`;
+            const titleLabel = ds.emphasized ? "ARAD" : (ds.label || "");
+            chart.options.plugins.title.text = `${titleLabel}: ${sign}${pct.toFixed(1)}%`;
           }
         }
       }
@@ -160,7 +171,9 @@ function animateRevealByIndex(chart, newData, opts = {}) {
         const pct = ((curr / base) - 1) * 100;
         const sign = pct >= 0 ? "+" : "";
         if (chart.options?.plugins?.title) {
-          chart.options.plugins.title.text = `${newData.datasets[dsIndex]?.label || ""}: ${sign}${pct.toFixed(1)}%`;
+          const ds = chart.data.datasets[dsIndex];
+          const titleLabel = ds?.emphasized ? "ARAD" : (ds?.label || "");
+          chart.options.plugins.title.text = `${titleLabel}: ${sign}${pct.toFixed(1)}%`;
         }
       }
       chart.update();
@@ -226,7 +239,13 @@ export default function CsvComparisonChart({ sources = [], options }) {
       const pts = rows
         .map((r) => ({ date: r[dateField], value: Number(r[vf]) }))
         .filter((p) => p.date && !Number.isNaN(p.value));
-      return { label: vf, color: undefined, points: pts };
+      const raw = String(vf ?? "");
+      const norm = raw.trim();
+      const low = norm.toLowerCase();
+      const isEmph = low.includes("strategy") || low.includes("arad");
+      const label = isEmph ? "ARAD" : norm;
+      const color = isEmph ? "#ffffff" : undefined;
+      return { label, color, points: pts };
     });
     // Union of dates
     const dateSet = new Set();
@@ -307,12 +326,16 @@ export default function CsvComparisonChart({ sources = [], options }) {
       const map = new Map(s.points.map((p) => [p.date, p.value]));
       const data = labels.map((d) => map.get(d) ?? null);
       const palette = [colors.meteorite, colors.frenchRose, colors.geraldine, colors.mediumRedViolet];
-      const isEmphasized = (s.label || "").toLowerCase().includes("strategy") || (s.label || "").toLowerCase().includes("arad");
+      const rawLabel = s.label || "";
+      const lower = rawLabel.toLowerCase();
+      const isEmphasized = lower.includes("strategy") || lower.includes("arad");
+      const displayLabel = lower.includes("strategy") ? "ARAD" : rawLabel;
+      const colorResolved = isEmphasized ? "#ffffff" : (s.color || palette[idx % palette.length]);
       const common = {
-        label: s.label,
+        label: displayLabel,
         data,
-        borderColor: s.color || palette[idx % palette.length],
-        backgroundColor: s.color || palette[idx % palette.length],
+        borderColor: colorResolved,
+        backgroundColor: colorResolved,
         borderWidth: isEmphasized ? 3.5 : 2,
         tension: 0.35,
         pointRadius: 0,
@@ -344,7 +367,28 @@ export default function CsvComparisonChart({ sources = [], options }) {
         animation: false,
         interaction: { mode: "index", intersect: false },
         plugins: {
-          legend: { display: true, position: "top", labels: { color: "#fff" } },
+          legend: {
+            display: true,
+            position: "top",
+            labels: {
+              color: "#fff",
+              generateLabels: (chart) => {
+                const defaultGen = Chart.defaults.plugins.legend.labels.generateLabels;
+                const items = defaultGen(chart);
+                return items.map((item) => {
+                  const ds = chart.data.datasets?.[item.datasetIndex];
+                  const labelRaw = String(ds?.label || "");
+                  const isEmph = ds?.emphasized || /strategy|arad/i.test(labelRaw);
+                  if (isEmph) {
+                    item.text = "ARAD";
+                    item.strokeStyle = "#ffffff";
+                    item.fillStyle = "#ffffff";
+                  }
+                  return item;
+                });
+              },
+            },
+          },
           title: {
             display: true,
             text: "",
@@ -369,10 +413,11 @@ export default function CsvComparisonChart({ sources = [], options }) {
                 const dsIndex = ctx.datasetIndex ?? 0;
                 const base = Number(baseArr[dsIndex] || 0);
                 const y = Number(ctx.parsed?.y ?? 0);
-                if (!base) return `${ds.label || ""}: ${y.toLocaleString()}`;
+                const labelText = ds.emphasized ? "ARAD" : (ds.label || "");
+                if (!base) return `${labelText}: ${y.toLocaleString()}`;
                 const pct = ((y / base) - 1) * 100;
                 const sign = pct >= 0 ? "+" : "";
-                return `${ds.label || ""}: ${sign}${pct.toFixed(1)}%`;
+                return `${labelText}: ${sign}${pct.toFixed(1)}%`;
               },
             },
           },
