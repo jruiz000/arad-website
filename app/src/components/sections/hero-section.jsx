@@ -56,13 +56,9 @@ export function Header2() {
               transition={{ duration: 0.4, ease: [0.4, 0, 0.2, 1] }}
             >
               <div className="w-full aspect-square bg-black/10">
-                {/* CSV-driven chart using a single 4-column CSV (Date, Strategy, S&P 500, Nasdaq 100) */}
+                {/* Auto-detect all series and headers from the CSV */}
                 <CsvComparisonChart
-                  sources={[
-                    { url: "/charts/DemoEquityChart.csv", label: "S&P 500", color: "#3C2074", valueField: "S&P 500", dateField: "Date" },
-                    { url: "/charts/DemoEquityChart.csv", label: "Nasdaq 100", color: "#EA4F88", valueField: "Nasdaq 100", dateField: "Date" },
-                    { url: "/charts/DemoEquityChart.csv", label: "ARAD", color: "#F89078", valueField: "Strategy", dateField: "Date" },
-                  ]}
+                  sources={[{ url: "/charts/DemoEquityChart.csv", autoDetect: true, hasHeader: true }]}
                 />
               </div>
             </motion.div>

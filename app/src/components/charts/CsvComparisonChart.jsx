@@ -31,14 +31,7 @@ const pctLabelsPlugin = {
       const curr = Number(dataArr[lastIdx] ?? 0);
       if (!base) continue;
       const pct = ((curr / base) - 1) * 100;
-      const label = `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
-      ctx.font = ds.emphasized ? "600 12px Inter, system-ui, -apple-system, Segoe UI, Roboto" : "500 11px Inter, system-ui, -apple-system, Segoe UI, Roboto";
-      ctx.fillStyle = ds.borderColor || "#fff";
-      ctx.strokeStyle = "rgba(0,0,0,0.4)";
-      ctx.lineWidth = 3;
-      ctx.strokeText(label, x, y);
-      ctx.fillText(label, x, y);
-      // Glowing moving dot on emphasized series
+      // Remove edge text labels; only keep a glowing dot for emphasized series
       if (ds.emphasized) {
         ctx.save();
         ctx.shadowColor = ds.borderColor || "#fff";
@@ -125,6 +118,23 @@ function animateRevealByIndex(chart, newData, opts = {}) {
           }
         }
       }
+      // Update dynamic title with emphasized series % return
+      const emphIndex = chart.data.datasets.findIndex((d) => d.emphasized);
+      const dsIndex = emphIndex >= 0 ? emphIndex : (chart.data.datasets.length - 1);
+      if (dsIndex >= 0) {
+        const base = Number(chart.$pctBase?.[dsIndex] || 0);
+        const ds = chart.data.datasets[dsIndex];
+        let lastIdx = Math.min(iFloor, L - 1);
+        while (lastIdx >= 0 && (ds.data[lastIdx] === null || ds.data[lastIdx] === undefined)) lastIdx--;
+        if (base && lastIdx >= 0) {
+          const curr = Number(ds.data[lastIdx] || 0);
+          const pct = ((curr / base) - 1) * 100;
+          const sign = pct >= 0 ? "+" : "";
+          if (chart.options?.plugins?.title) {
+            chart.options.plugins.title.text = `${ds.label || ""}: ${sign}${pct.toFixed(1)}%`;
+          }
+        }
+      }
       chart.update("none");
     },
     onComplete: () => {
@@ -142,6 +152,16 @@ function animateRevealByIndex(chart, newData, opts = {}) {
       }
       if (lastIdx >= 0) {
         chart.setActiveElements([{ datasetIndex: dsIndex, index: lastIdx }]);
+      }
+      // Final title update
+      const base = Number(chart.$pctBase?.[dsIndex] || 0);
+      if (base && lastIdx >= 0) {
+        const curr = Number(targets[dsIndex][lastIdx] || 0);
+        const pct = ((curr / base) - 1) * 100;
+        const sign = pct >= 0 ? "+" : "";
+        if (chart.options?.plugins?.title) {
+          chart.options.plugins.title.text = `${newData.datasets[dsIndex]?.label || ""}: ${sign}${pct.toFixed(1)}%`;
+        }
       }
       chart.update();
     },
@@ -173,6 +193,49 @@ export default function CsvComparisonChart({ sources = [], options }) {
     karry: "#FFE5D0",
   };
 
+  // Heuristics to auto-detect date column and build datasets from headers
+  function detectDateFieldFromRows(rows) {
+    if (!rows || !rows.length) return "date";
+    const keys = Object.keys(rows[0] || {});
+    // Prefer header names containing 'date' or 'time'
+    const preferred = keys.find((k) => /date|time/i.test(k));
+    if (preferred) return preferred;
+    // Fallback: pick the column with highest ratio of parseable dates
+    let best = keys[0];
+    let bestScore = -1;
+    for (const k of keys) {
+      let ok = 0;
+      const total = Math.min(rows.length, 200);
+      for (let i = 0; i < total; i++) {
+        const v = rows[i][k];
+        if (v && !Number.isNaN(Date.parse(v))) ok++;
+      }
+      const score = ok / total;
+      if (score > bestScore) { bestScore = score; best = k; }
+    }
+    return best;
+  }
+
+  function buildSeriesAutoFromRows(rows) {
+    if (!rows || !rows.length) return { series: [], labels: [] };
+    const dateField = detectDateFieldFromRows(rows);
+    const keys = Object.keys(rows[0] || {});
+    const valueFields = keys.filter((k) => k !== dateField);
+    // Build points per value field
+    const byField = valueFields.map((vf) => {
+      const pts = rows
+        .map((r) => ({ date: r[dateField], value: Number(r[vf]) }))
+        .filter((p) => p.date && !Number.isNaN(p.value));
+      return { label: vf, color: undefined, points: pts };
+    });
+    // Union of dates
+    const dateSet = new Set();
+    byField.forEach((s) => s.points.forEach((p) => dateSet.add(p.date)));
+    const allDates = Array.from(dateSet);
+    allDates.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    return { series: byField, labels: allDates };
+  }
+
   // Fetch all CSVs and align by date. Supports per-source hasHeader/dateField/valueField.
   useEffect(() => {
     let mounted = true;
@@ -184,31 +247,45 @@ export default function CsvComparisonChart({ sources = [], options }) {
           setLabels([]);
           return;
         }
-        const fetched = await Promise.all(
-          sources.map(async (src) => {
-            const res = await fetch(src.url, { cache: "no-store" });
-            if (!res.ok) throw new Error(`Failed to load ${src.url}`);
-            const text = await res.text();
-            const rows = parseSimpleCsv(text, { hasHeader: src.hasHeader !== false });
-            const valueField = src.valueField || "equity";
-            const dateField = src.dateField || "date";
-            const points = rows
-              .map((r) => ({ date: r[dateField], value: Number(r[valueField] ?? 0) }))
-              .filter((p) => p.date && !Number.isNaN(p.value));
-            return { label: src.label, color: src.color, points };
-          })
-        );
+        // If any source requests autoDetect, parse once and build all series from headers
+        const wantsAuto = sources.some((s) => s.autoDetect);
+        if (wantsAuto || (sources.length === 1 && !sources[0].valueField)) {
+          const src = sources[0];
+          const res = await fetch(src.url, { cache: "no-store" });
+          if (!res.ok) throw new Error(`Failed to load ${src.url}`);
+          const text = await res.text();
+          const rows = parseSimpleCsv(text, { hasHeader: src?.hasHeader !== false });
+          const { series: builtSeries, labels: builtLabels } = buildSeriesAutoFromRows(rows);
+          if (!mounted) return;
+          setLabels(builtLabels);
+          setSeries(builtSeries);
+        } else {
+          const fetched = await Promise.all(
+            sources.map(async (src) => {
+              const res = await fetch(src.url, { cache: "no-store" });
+              if (!res.ok) throw new Error(`Failed to load ${src.url}`);
+              const text = await res.text();
+              const rows = parseSimpleCsv(text, { hasHeader: src.hasHeader !== false });
+              const valueField = src.valueField || "equity";
+              const dateField = src.dateField || "date";
+              const points = rows
+                .map((r) => ({ date: r[dateField], value: Number(r[valueField] ?? 0) }))
+                .filter((p) => p.date && !Number.isNaN(p.value));
+              return { label: src.label, color: src.color, points };
+            })
+          );
 
-        if (!mounted) return;
+          if (!mounted) return;
 
-        // Compute union of dates and sort ascending
-        const dateSet = new Set();
-        fetched.forEach((s) => s.points.forEach((p) => dateSet.add(p.date)));
-        const allDates = Array.from(dateSet);
-        allDates.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+          // Compute union of dates and sort ascending
+          const dateSet = new Set();
+          fetched.forEach((s) => s.points.forEach((p) => dateSet.add(p.date)));
+          const allDates = Array.from(dateSet);
+          allDates.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
-        setLabels(allDates);
-        setSeries(fetched);
+          setLabels(allDates);
+          setSeries(fetched);
+        }
       } catch (err) {
         console.error("CsvComparisonChart load error:", err);
         if (!mounted) return;
@@ -268,6 +345,13 @@ export default function CsvComparisonChart({ sources = [], options }) {
         interaction: { mode: "index", intersect: false },
         plugins: {
           legend: { display: true, position: "top", labels: { color: "#fff" } },
+          title: {
+            display: true,
+            text: "",
+            color: "#ffffff",
+            font: { size: 18, weight: "700" },
+            padding: { top: 8, bottom: 12 },
+          },
           tooltip: {
             enabled: true,
             mode: "nearest",
@@ -306,7 +390,13 @@ export default function CsvComparisonChart({ sources = [], options }) {
             ticks: { color: "#e5e7eb", major: { enabled: true } },
             grid: { color: "rgba(255,255,255,0.08)" },
           },
-          y: { beginAtZero: true, ticks: { color: "#e5e7eb" }, grid: { color: "rgba(255,255,255,0.08)" } },
+          y: {
+            beginAtZero: false,
+            min: 50000,
+            max: 200000,
+            ticks: { color: "#e5e7eb" },
+            grid: { color: "rgba(255,255,255,0.08)" },
+          },
         },
         ...options,
       },
