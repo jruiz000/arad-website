@@ -21,7 +21,7 @@ export default function Dashboard() {
       <main style={{ flex: "1 1 auto", minHeight: 0 }}>
         <div style={{ width: "100%", height: "100%" }}>
           <iframe
-            src="https://arad-v3.onrender.com/"
+            src="https://arad-me746.ondigitalocean.app/"
             title="ARAD Dashboard"
             frameBorder="0"
             style={{ width: "100%", height: "100%", display: "block", border: "none" }}
